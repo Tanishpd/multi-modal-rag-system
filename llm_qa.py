@@ -1,28 +1,33 @@
+# llm_qa.py
 from langchain_huggingface import HuggingFacePipeline
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
 import torch
+import traceback
 
 class LLMQA:
     def __init__(self, model_name='google/flan-t5-base'):
-        print(f"Loading LLM model via LangChain: {model_name}")
-        
-        device = 0 if torch.cuda.is_available() else -1
-        device_name = 'GPU' if device == 0 else 'CPU'
-        
+        print(f"Loading LLM model: {model_name}")
+        self.model_name = model_name
+
+        self.device = 0 if torch.cuda.is_available() else -1
+        device_name = 'GPU' if self.device == 0 else 'CPU'
+        print(f"Target device: {device_name}")
+
         try:
             tokenizer = AutoTokenizer.from_pretrained(model_name)
             model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-            
-            pipe = pipeline(
+            # create transformers pipeline (this returns list[dict] with 'generated_text')
+            self.pipe = pipeline(
                 "text2text-generation",
                 model=model,
                 tokenizer=tokenizer,
                 max_length=512,
-                device=device,
+                device=self.device,
                 temperature=0.7
             )
-            self.llm = HuggingFacePipeline(pipeline=pipe)
-        
+            # keep a small wrapper for LangChain compatibility if required
+            self.llm = HuggingFacePipeline(pipeline=self.pipe)
+
             self.prompt_template = """Based on the following context, answer the question. If the answer is not in the context, say "I cannot find this information in the document."
 
 Context:
@@ -31,61 +36,76 @@ Context:
 Question: {question}
 
 Answer:"""
-            
-            print(f"LangChain LLM loaded on {device_name}")
-            
+
+            print(f"LLM loaded on {device_name}")
+
         except Exception as e:
             print(f"Error loading model: {e}")
+            traceback.print_exc()
             raise
-    
+
+    def _call_model(self, prompt):
+        """
+        Call the underlying transformers pipeline and return the generated text.
+        Safely handle different return shapes.
+        """
+        try:
+            gen = self.pipe(prompt, max_length=512)
+            # expected: list of dicts with 'generated_text'
+            if isinstance(gen, list) and len(gen) > 0:
+                if isinstance(gen[0], dict) and 'generated_text' in gen[0]:
+                    return gen[0]['generated_text'].strip()
+                # fallback to join any strings
+                return str(gen[0]).strip()
+            # fallback
+            return str(gen).strip()
+        except Exception as e:
+            print(f"Model generation error: {e}")
+            traceback.print_exc()
+            return None
+
     def generate_answer(self, query, context_chunks):
         context_text = "\n\n".join([
-            f"[Source: {chunk['source']}]\n{chunk['content'][:500]}"
-            for chunk in context_chunks[:3]
+            f"[Source: {chunk.get('source','unknown')}]\n{chunk.get('content','')[:2000]}"
+            for chunk in context_chunks[:5]
         ])
-        
+
         prompt = self.prompt_template.format(
             context=context_text,
             question=query
         )
-        
-        try:
-            result = self.llm.invoke(prompt)
-            answer = result.strip()
-            
-        except Exception as e:
-            print(f"Error generating answer: {e}")
-            answer = "Sorry, I encountered an error generating the answer."
-        
-        return answer
-    
+
+        result_text = self._call_model(prompt)
+        if not result_text:
+            return "Sorry, I encountered an error generating the answer."
+        return result_text
+
     def generate_answer_with_citations(self, query, search_results):
-        
         context_chunks = [result['chunk'] for result in search_results]
-        
         answer = self.generate_answer(query, context_chunks)
-       
+
         citations = []
         for i, result in enumerate(search_results[:3]):
             chunk = result['chunk']
             citations.append({
                 'rank': i + 1,
-                'source': chunk['source'],
-                'page': chunk['page'],
-                'type': chunk['type'],
-                'relevance_score': result['score']
+                'source': chunk.get('source'),
+                'page': chunk.get('page'),
+                'type': chunk.get('type'),
+                'relevance_score': float(result.get('score', 0.0))
             })
-        
+
         return {
             'answer': answer,
             'citations': citations,
             'context_used': len(context_chunks)
         }
 
+
 class SimpleQA:
     def __init__(self):
-        print()
-    
+        pass
+
     def generate_answer_with_citations(self, query, search_results):
         if not search_results:
             return {
@@ -94,35 +114,36 @@ class SimpleQA:
                 'context_used': 0
             }
         top_chunks = search_results[:3]
-        
+
         answer_parts = []
         for result in top_chunks:
             chunk = result['chunk']
-            snippet = chunk['content'][:200].strip()
+            snippet = chunk['content'][:300].strip()
             if snippet:
-                answer_parts.append(f"From {chunk['source']}: {snippet}...")
-        
+                answer_parts.append(f"From {chunk.get('source','unknown')}: {snippet}...")
+
         answer = "\n\n".join(answer_parts) if answer_parts else "No relevant information found."
-        
+
         citations = []
         for i, result in enumerate(top_chunks):
             chunk = result['chunk']
             citations.append({
                 'rank': i + 1,
-                'source': chunk['source'],
-                'page': chunk['page'],
-                'type': chunk['type'],
-                'relevance_score': result['score']
+                'source': chunk.get('source'),
+                'page': chunk.get('page'),
+                'type': chunk.get('type'),
+                'relevance_score': float(result.get('score', 0.0))
             })
-        
+
         return {
             'answer': answer,
             'citations': citations,
             'context_used': len(search_results)
         }
 
-if __name__ == "__main__":
 
+if __name__ == "__main__":
+    # quick local smoke test (no model required for SimpleQA)
     test_results = [
         {
             'chunk': {
@@ -143,17 +164,5 @@ if __name__ == "__main__":
             'score': 0.72
         }
     ]
-    try:
-        print("\n1. Test ")
-        qa = LLMQA()
-        result = qa.generate_answer_with_citations("What is Qatar's growth?", test_results)
-        print(f"\nAnswer: {result['answer']}")
-        print(f"Citations: {len(result['citations'])} sources")
-        
-    except Exception as e:
-        print(f"\nLangChain LLMQA failed: {e}")
-        print("\n2. Test Fallback ")
-        qa = SimpleQA()
-        result = qa.generate_answer_with_citations("What is Qatar's growth?", test_results)
-        print(f"\nAnswer: {result['answer']}")
-        print(f"Citations: {len(result['citations'])} sources")
+    qa = SimpleQA()
+    print(qa.generate_answer_with_citations("What is Qatar's growth?", test_results))

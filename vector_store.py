@@ -1,7 +1,9 @@
+# vector_store.py
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 import pickle
+import os
 
 class VectorStore:
     def __init__(self, model_name='sentence-transformers/all-MiniLM-L6-v2'):
@@ -13,63 +15,64 @@ class VectorStore:
         )
         self.vectorstore = None
         self.chunks = []
-        
         print("successfully loaded")
-        
+
     def create_embeddings(self, chunks):
+        if not chunks:
+            print("No chunks provided to create embeddings")
+            return
         self.chunks = chunks
         documents = []
         for i, chunk in enumerate(chunks):
             doc = Document(
-                page_content=chunk['content'],
+                page_content=chunk.get('content',''),
                 metadata={
-                    'page': chunk['page'],
-                    'type': chunk['type'],
-                    'source': chunk['source'],
+                    'page': chunk.get('page'),
+                    'type': chunk.get('type'),
+                    'source': chunk.get('source'),
                     'chunk_id': i
                 }
             )
             documents.append(doc)
-        
-        print("Building FAISS index...")
+        print("Building FAISS index.")
         self.vectorstore = FAISS.from_documents(
             documents=documents,
             embedding=self.embeddings
         )
-        
         print(f"FAISS index with {len(documents)} vectors")
-        
+
     def search(self, query, k=5):
         if self.vectorstore is None:
             print("Vectorstore not created")
             return []
         results = self.vectorstore.similarity_search_with_score(query, k=k)
-        
         formatted_results = []
         for i, (doc, score) in enumerate(results):
             formatted_results.append({
                 'chunk': {
                     'content': doc.page_content,
-                    'page': doc.metadata['page'],
-                    'type': doc.metadata['type'],
-                    'source': doc.metadata['source']
+                    'page': doc.metadata.get('page'),
+                    'type': doc.metadata.get('type'),
+                    'source': doc.metadata.get('source')
                 },
                 'score': float(score),
                 'rank': i + 1
             })
-        
         return formatted_results
-    
+
     def save(self, filepath='vector_store'):
         if self.vectorstore is None:
             print("No vectorstore to save")
             return
+        # ensure dir exists
+        os.makedirs(os.path.dirname(filepath) or '.', exist_ok=True)
         self.vectorstore.save_local(filepath)
-    
         with open(f"{filepath}_chunks.pkl", 'wb') as f:
             pickle.dump(self.chunks, f)
-    
+
     def load(self, filepath='vector_store'):
+        if not os.path.exists(f"{filepath}_index.faiss") and not os.path.exists(filepath):
+            raise FileNotFoundError(f"No vectorstore files found at {filepath}")
         self.vectorstore = FAISS.load_local(
             filepath,
             self.embeddings,
@@ -77,8 +80,7 @@ class VectorStore:
         )
         with open(f"{filepath}_chunks.pkl", 'rb') as f:
             self.chunks = pickle.load(f)
-        
-        print(f"Loaded vector store chunks")
+        print(f"Loaded vector store chunks: {len(self.chunks)}")
 
 if __name__ == "__main__":
     test_chunks = [
@@ -86,11 +88,9 @@ if __name__ == "__main__":
         {'content': 'Banking sector remains healthy', 'page': 2, 'type': 'text', 'source': 'Page 2'},
         {'content': 'IMF recommendations for fiscal policy', 'page': 3, 'type': 'text', 'source': 'Page 3'}
     ]
-    
-    print("Testing LangChain Vector Store...")
+    print("Testing LangChain Vector Store.")
     store = VectorStore()
     store.create_embeddings(test_chunks)
-    
     results = store.search("What is Qatar's economic situation?", k=2)
     print(f"\nSearch Results:")
     for result in results:
